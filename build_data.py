@@ -465,25 +465,39 @@ def classify_population_row(row: dict, vars_: list[dict]) -> str | None:
 
 
 def classify_labour_row(row: dict, vars_: list[dict]) -> str | None:
-    """Map TAB6260's table-content measures to stable application IDs.
+    """Map TAB6260 ContentsCode measures to stable application IDs.
 
-    Match the measure label, not arbitrary substrings elsewhere in the row.
-    In particular, ``antal sysselsatta och arbetslösa (arbetskraften)`` must
-    become labour_force rather than employed.
+    Prefer ContentsCode_text because other *_text fields describe region,
+    age, sex, etc. Fall back to the combined labels only if that field is
+    unavailable.
     """
-    labels = [
-        str(v) for k, v in row.items()
-        if k.endswith("_text")
-    ]
-    n = " ".join(norm(v) for v in labels)
+    measure = ""
+    for key in ("ContentsCode_text", "ContentsCode"):
+        if key in row:
+            measure = norm(row.get(key, ""))
+            if measure:
+                break
 
-    # Most important/specific categories first.
-    if "sysselsatta och arbetslosa" in n or "arbetskraften" in n:
+    exact = {
+        "antal sysselsatta": "employed",
+        "antal arbetslosa": "unemployed",
+        "antal sysselsatta och arbetslosa (arbetskraften)": "labour_force",
+        "arbetsloshet": "unemployment_rate",
+        "arbetskraftsdeltagande": "participation_rate",
+        "sysselsattningsgrad": "employment_rate",
+    }
+    if measure in exact:
+        return exact[measure]
+
+    labels = [norm(v) for k, v in row.items() if k.endswith("_text")]
+    n = " ".join(labels)
+
+    if "sysselsatta och arbetslosa" in n:
         return "labour_force"
-    if "sysselsattningsgrad" in n:
-        return "employment_rate"
     if "arbetskraftsdeltagande" in n:
         return "participation_rate"
+    if "sysselsattningsgrad" in n:
+        return "employment_rate"
     if "arbetsloshet" in n:
         return "unemployment_rate"
     if re.search(r"\bantal arbetslosa\b", n):
@@ -726,6 +740,12 @@ def main():
         )
 
     variables = variable_metadata(values, source_ranges)
+
+    print("\n=== SERIES DIAGNOSTICS ===")
+    for vid in sorted(values):
+        n_obs = sum(len(cm) for cm in values[vid].values())
+        n_communes = len(values[vid])
+        print(f"  {vid}: {n_obs} observations across {n_communes} municipalities")
 
     # Require the core analysis series as well as the tables themselves.
     required_series = {
