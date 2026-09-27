@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kommunal tillväxtanalys – SCB</title>
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--text:#17202a;--muted:#667085;--line:#d8dee8;--blue:#175cd3;--blue2:#eaf1ff;--red:#b42318}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,-apple-system,Segoe UI,Arial}
+header{background:#102a43;color:white;padding:24px 28px}header h1{margin:0 0 5px;font-size:26px}header p{margin:0;color:#d9e2ec}
+main{max-width:1500px;margin:18px auto;padding:0 16px}.layout{display:grid;grid-template-columns:360px 1fr;gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+h2{font-size:17px;margin:0 0 12px}.help{color:var(--muted);font-size:12px;line-height:1.5}
+label{font-weight:650;display:block;margin:11px 0 5px}select,button{width:100%;padding:10px;border:1px solid #c9d2df;border-radius:8px;background:white;font:inherit}
+button{background:var(--blue);color:#fff;border:0;font-weight:700;cursor:pointer;margin-top:12px}button:disabled{opacity:.45}
+.status{padding:10px;border-radius:8px;background:#eef4ff;color:#1d4ed8;margin-top:10px}.status.err{background:#fef3f2;color:#b42318}.status.ok{background:#ecfdf3;color:#067647}
+.variable{border:1px solid var(--line);border-radius:9px;padding:10px;margin:8px 0}.variable label{margin:0;font-weight:600}.tag{display:inline-block;font-size:11px;background:#eef2f6;border-radius:999px;padding:3px 7px;margin:4px 3px 0 0;color:#475467}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.tab{width:auto;padding:8px 12px;background:#edf2f7;color:#344054}.tab.active{background:var(--blue);color:#fff}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.kpi{background:#f8fafc;border:1px solid var(--line);border-radius:9px;padding:12px}.kpi b{display:block;font-size:20px;margin-top:3px}
+table{border-collapse:collapse;width:100%}th,td{padding:8px;border-bottom:1px solid #edf0f4;text-align:left}th{font-size:12px;color:var(--muted);background:#fff;position:sticky;top:0}.num{text-align:right;font-variant-numeric:tabular-nums}
+.pos{color:#067647;font-weight:700}.neg{color:#b42318;font-weight:700}
+.chart{height:440px;border:1px solid var(--line);border-radius:9px;background:#fff}.chart svg{width:100%;height:100%}
+@media(max-width:1000px){.layout{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}}
+</style></head>
+<body>
+<header><h1>Kommunal tillväxtanalys</h1><p>SCB månadsdata – befolkning, jobb, arbetsmarknad, näringsliv och attraktivitetsindikatorer</p></header>
+<main>
+<div class="layout">
+<aside>
+<div class="card">
+<h2>1. Analys</h2>
+<label>Analys</label>
+<select id="mode">
+<option value="cross">Alla kommuner – tvärsnitt</option>
+<option value="within">En kommun – över tid</option>
+<option value="panel">Alla kommuner – kommun × månad</option>
+</select>
+<label>Kommun</label><select id="municipality"><option value="">Alla kommuner</option></select>
+<label>Period</label>
+<div class="grid2"><select id="from"></select><select id="to"></select></div>
+<div class="help">Välj endast perioder som finns i vald variabel. Rapporten visar tillgängliga månader som rullistor i stället för fritext.</div>
+<label>Målvariabel</label>
+<select id="target">
+<option value="population">Folkökning</option>
+<option value="population_pct">Folkökning, procent av befolkningen</option>
+</select>
+<label>Lag</label><select id="lag"></select>
+<label>Korrelation</label><select id="corr"><option value="pearson">Pearson</option><option value="spearman">Spearman</option></select>
+<button id="run">Kör analys</button><div id="status" class="status">Laddar data…</div>
+</div>
+<div class="card"><h2>2. Variabler</h2><div class="help">Variablerna är grupperade efter vad de kan mäta. Du kan välja flera samtidigt.</div><div id="variables"></div></div>
+<div class="card"><h2>Metod</h2><div class="help">
+<b>Tvärsnitt:</b> en observation per kommun; förändring i vald variabel under perioden jämförs med befolkningstillväxt under samma period.<br><br>
+<b>Över tid:</b> månad-för-månad inom vald kommun.<br><br>
+<b>Panel:</b> kommun × månad. Det är användbart för explorativ analys men blandar variation mellan kommuner och variation över tid.<br><br>
+Lag 3 betyder att X ligger tre månader före Y. Korrelation är samband, inte kausalitet.
+</div></div>
+</aside>
+<section>
+<div class="card"><div class="tabs"><button class="tab active" data-tab="results">Resultat</button><button class="tab" data-tab="data">Data</button></div>
+<div id="resultsTab">
+<div class="kpis"><div class="kpi">Variabler<b id="kVar">0</b></div><div class="kpi">Observationer<b id="kN">0</b></div><div class="kpi">Kommuner<b id="kComm">0</b></div><div class="kpi">Period<b id="kPeriod">–</b></div></div>
+<div style="max-height:360px;overflow:auto;margin-top:14px"><table><thead><tr><th>Variabel</th><th>r</th><th>n</th><th>R²</th><th>Period</th></tr></thead><tbody id="results"></tbody></table></div>
+</div>
+<div id="dataTab" style="display:none"><div class="help">Förhandsvisning av de parade observationerna för vald variabel.</div><div style="max-height:550px;overflow:auto"><table><thead><tr><th>Kommun</th><th>Månad</th><th>X</th><th>Y</th></tr></thead><tbody id="dataRows"></tbody></table></div></div>
+</div>
+<div class="card"><h2>Scatterplot</h2><div id="chart" class="chart"></div><div id="chartHelp" class="help" style="margin-top:7px"></div></div>
+<div class="card"><h2>Tidsserie</h2><div id="timeline" class="chart"></div></div>
+<div class="card"><h2>SCB-källor</h2><div id="sources" class="help"></div></div>
+</section>
+</div></main>
+<script>
+let DATA=null, selected=new Set(), currentPoints=[];
+const $=id=>document.getElementById(id);
+function esc(s){return String(s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
+function status(t,c=''){ $('status').className='status '+c; $('status').textContent=t}
+function corr(a,b,type){if(a.length<3)return null;let x=a,y=b;if(type==='spearman'){x=rank(a);y=rank(b)}const mx=mean(x),my=mean(y);let n=0,dx=0,dy=0;for(let i=0;i<x.length;i++){n+=(x[i]-mx)*(y[i]-my);dx+=(x[i]-mx)**2;dy+=(y[i]-my)**2}return dx&&dy?n/Math.sqrt(dx*dy):null}
+function mean(a){return a.reduce((s,x)=>s+x,0)/a.length}
+function rank(a){let s=a.map((v,i)=>({v,i})).sort((a,b)=>a.v-b.v),r=Array(a.length);for(let i=0;i<s.length;){let j=i;while(j+1<s.length&&s[j+1].v===s[i].v)j++;let av=(i+j)/2+1;for(let k=i;k<=j;k++)r[s[k].i]=av;i=j+1}return r}
+function addMonths(t,n){let [y,m]=t.split('M').map(Number),d=new Date(Date.UTC(y,m-1,1));d.setUTCMonth(d.getUTCMonth()+n);return d.getUTCFullYear()+'M'+String(d.getUTCMonth()+1).padStart(2,'0')}
+function periodList(){
+ const ids=[...selected];
+ if(!ids.length)return DATA.periods;
+ const vs=ids.map(id=>DATA.variables.find(v=>v.id===id)).filter(Boolean);
+ const lo=vs.reduce((a,v)=>a>v.from?a:v.from,vs[0].from), hi=vs.reduce((a,v)=>a<v.to?a:v.to,vs[0].to);
+ return DATA.periods.filter(x=>x>=lo&&x<=hi);
+}
+function renderPeriods(){
+ let ps=periodList(); const oldFrom=$('from').value,oldTo=$('to').value;
+ $('from').innerHTML=ps.map(x=>`<option>${x}</option>`).join('');$('to').innerHTML=ps.map(x=>`<option>${x}</option>`).join('');
+ $('from').value=ps.includes(oldFrom)?oldFrom:ps[0];$('to').value=ps.includes(oldTo)?oldTo:ps.at(-1);
+}
+function renderVariables(){
+ const groups={};
+ DATA.variables.forEach(v=>(groups[v.group]??=[]).push(v));
+ $('variables').innerHTML=Object.entries(groups).map(([g,vs])=>`<div style="margin:12px 0 5px"><b>${esc(g)}</b></div>`+
+ vs.map(v=>`<div class="variable"><label><input type="checkbox" value="${v.id}"> ${esc(v.name)}</label><div>${v.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div><div class="help">Tillgänglig: ${v.from} – ${v.to}</div></div>`).join('')).join('');
+ document.querySelectorAll('#variables input').forEach(x=>x.onchange=()=>{x.checked?selected.add(x.value):selected.delete(x.value);renderPeriods()})
+}
+function renderMunicipalities(){ $('municipality').innerHTML='<option value="">Alla kommuner</option>'+DATA.communes.map(x=>`<option value="${x.code}">${esc(x.name)}</option>`).join('') }
+function val(v,code,time){return DATA.values[v]?.[code]?.[time]}
+function getGrowth(code,from,to,target){
+ const ps=DATA.periods.filter(t=>t>=from&&t<=to); if(ps.length<2)return null;
+ const a=val('population',code,ps[0]), b=val('population',code,ps.at(-1)); if(a==null||b==null)return null;
+ if(target==='population_pct')return a?100*(b-a)/a:null; return b-a;
+}
+function aggregateMetric(id,code,from,to){
+ const ps=DATA.periods.filter(t=>t>=from&&t<=to), a=val(id,code,ps[0]), b=val(id,code,ps.at(-1));
+ if(a==null||b==null)return null; return b-a;
+}
+function monthlyTarget(code,t,target){
+ if(target==='population'){
+   const direct=DATA.values.population_growth?.[code]?.[t];
+   if(direct!=null)return direct;
+   const p=val('population',code,t),prev=val('population',code,addMonths(t,-1));
+   return p!=null&&prev!=null?p-prev:null;
+ }
+ const p=val('population',code,t),prev=val('population',code,addMonths(t,-1));
+ return p!=null&&prev?100*(p-prev)/prev:null
+}
+function renderScatter(points,label){
+ const el=$('chart'); if(!points.length){el.innerHTML='';return}
+ const W=900,H=420,pl=65,pr=25,pt=35,pb=55,xs=points.map(p=>p.x),ys=points.map(p=>p.y),xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys),sx=x=>pl+(x-xmin)/(xmax-xmin||1)*(W-pl-pr),sy=y=>H-pb-(y-ymin)/(ymax-ymin||1)*(H-pt-pb);
+ let svg=`<svg viewBox="0 0 ${W} ${H}"><text x="${W/2}" y="20" text-anchor="middle" font-size="15">${esc(label)}</text><line x1="${pl}" y1="${H-pb}" x2="${W-pr}" y2="${H-pb}" stroke="#98a2b3"/><line x1="${pl}" y1="${pt}" x2="${pl}" y2="${H-pb}" stroke="#98a2b3"/>`;
+ for(const p of points.slice(0,5000))svg+=`<circle cx="${sx(p.x)}" cy="${sy(p.y)}" r="3" fill="#175cd3" opacity=".38"/>`;
+ const mx=mean(xs),my=mean(ys);let num=0,den=0;for(let i=0;i<xs.length;i++){num+=(xs[i]-mx)*(ys[i]-my);den+=(xs[i]-mx)**2}const m=den?num/den:0,c=my-m*mx;
+ svg+=`<line x1="${sx(xmin)}" y1="${sy(m*xmin+c)}" x2="${sx(xmax)}" y2="${sy(m*xmax+c)}" stroke="#b42318" stroke-width="2"/></svg>`;el.innerHTML=svg;
+}
+function renderTimeline(points,label){
+ const by={};points.forEach(p=>(by[p.time]??=[]).push(p.y));const a=Object.entries(by).map(([time,v])=>({time,y:mean(v)})).sort((a,b)=>a.time.localeCompare(b.time));
+ if(!a.length){$('timeline').innerHTML='';return} const W=900,H=420,pl=55,pr=20,pt=30,pb=50,ys=a.map(x=>x.y),ymin=Math.min(...ys),ymax=Math.max(...ys),sx=i=>pl+i/(a.length-1||1)*(W-pl-pr),sy=y=>H-pb-(y-ymin)/(ymax-ymin||1)*(H-pt-pb);
+ let path=a.map((x,i)=>(i?'L':'M')+sx(i)+' '+sy(x.y)).join(' ');$('timeline').innerHTML=`<svg viewBox="0 0 ${W} ${H}"><text x="${W/2}" y="20" text-anchor="middle" font-size="15">${esc(label)}</text><path d="${path}" fill="none" stroke="#175cd3" stroke-width="2.5"/><line x1="${pl}" y1="${H-pb}" x2="${W-pr}" y2="${H-pb}" stroke="#98a2b3"/><line x1="${pl}" y1="${pt}" x2="${pl}" y2="${H-pb}" stroke="#98a2b3"/></svg>`;
+}
+function renderSources(){ $('sources').innerHTML=DATA.sources.map(s=>`<div style="margin:7px 0"><a href="${s.url}" target="_blank">${esc(s.name)}</a> – ${esc(s.note)}</div>`).join('') }
+function run(){
+ const ids=[...selected];if(!ids.length){status('Välj minst en variabel.','err');return}
+ const from=$('from').value,to=$('to').value,mode=$('mode').value,comm=$('municipality').value,target=$('target').value,lag=+$('lag').value,type=$('corr').value;
+ if(from>=to){status('Startperiod måste vara före slutperiod.','err');return}
+ let codes=comm?[comm]:DATA.communes.map(x=>x.code), all=[];
+ const rows=[]; let first=null;
+ for(const id of ids){
+   const pts=[];
+   if(mode==='cross'){
+     for(const code of codes){let x=aggregateMetric(id,code,from,to);let y=getGrowth(code,from,to,target);if(x!=null&&y!=null)pts.push({x,y,region:code,time:to})}
+   }else{
+     const ps=DATA.periods.filter(t=>t>=from&&t<=to);
+     for(const code of codes)for(const t of ps){let xt=addMonths(t,-lag),x=val(id,code,xt),y=monthlyTarget(code,t,target);if(x!=null&&y!=null)pts.push({x,y,region:code,time:t})}
+   }
+   const r=corr(pts.map(p=>p.x),pts.map(p=>p.y),type);rows.push({id,name:DATA.variables.find(v=>v.id===id).name,r,n:pts.length,r2:r==null?null:r*r,pts});if(!first)first=pts;
+ }
+ $('results').innerHTML=rows.map(x=>`<tr><td>${esc(x.name)}</td><td class="${x.r>=0?'pos':'neg'}">${x.r==null?'–':x.r.toFixed(3)}</td><td>${x.n}</td><td>${x.r2==null?'–':x.r2.toFixed(3)}</td><td>${from}–${to}</td></tr>`).join('');
+ $('kVar').textContent=rows.length;$('kN').textContent=rows.reduce((s,x)=>s+x.n,0);$('kComm').textContent=mode==='within'&&comm?'1':codes.length;$('kPeriod').textContent=from+'–'+to;
+ currentPoints=first||[];renderScatter(currentPoints,rows[0]?.name+' ↔ befolkningstillväxt');renderTimeline(currentPoints,rows[0]?.name+' – tidsserie');
+ $('dataRows').innerHTML=currentPoints.slice(0,1000).map(p=>`<tr><td>${esc(DATA.communes.find(c=>c.code===p.region)?.name||p.region)}</td><td>${p.time}</td><td class="num">${p.x.toFixed(2)}</td><td class="num">${p.y.toFixed(2)}</td></tr>`).join('');
+ status('Analysen är klar.','ok');
+}
+$('run').onclick=run;
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('resultsTab').style.display=b.dataset.tab==='results'?'block':'none';$('dataTab').style.display=b.dataset.tab==='data'?'block':'none'});
+$('mode').onchange=()=>{$('municipality').disabled=$('mode').value==='cross'||$('mode').value==='panel'?true:false};
+(async()=>{try{const r=await fetch('data.json');if(!r.ok)throw Error('data.json saknas – kör GitHub Action "Build SCB data".');DATA=await r.json();renderPeriods();renderMunicipalities();renderVariables();renderSources();for(let i=0;i<=12;i++)$('lag').innerHTML+=`<option>${i}</option>`;status('Data laddad. Välj analys och variabler.','ok')}catch(e){status(e.message,'err')}})();
+</script></body></html>
