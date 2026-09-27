@@ -511,13 +511,41 @@ def build_labour_measure_map(vars_: list[dict]) -> dict[str, str]:
     if measure_var is None:
         return {}
 
+    pairs = var_pairs(measure_var)
     mapping = {}
+
+    # Prefer label-based matching.
     print("TAB6260 measure mapping from metadata:")
-    for code, label in var_pairs(measure_var):
+    for code, label in pairs:
         sid = labour_measure_id(label)
         print(f"  {code} -> {label!r} -> {sid}")
         if sid:
             mapping[str(code)] = sid
+
+    # TAB6260 publishes its 11 table contents in a fixed documented order:
+    # employed, unemployed, labour force, students, pensioners, sick, other,
+    # total, unemployment rate, participation rate, employment rate.
+    # If SCB's returned labels are incomplete/opaque for some categories,
+    # use the metadata category order as a deterministic fallback.
+    ordered_ids = [
+        "employed",
+        "unemployed",
+        "labour_force",
+        None,
+        None,
+        None,
+        None,
+        None,
+        "unemployment_rate",
+        "participation_rate",
+        "employment_rate",
+    ]
+    if len(pairs) == len(ordered_ids):
+        for (code, label), sid in zip(pairs, ordered_ids):
+            if sid and str(code) not in mapping:
+                mapping[str(code)] = sid
+                print(f"  FALLBACK ORDER: {code} -> {label!r} -> {sid}")
+
     return mapping
 
 
