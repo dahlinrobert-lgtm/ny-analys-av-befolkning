@@ -32,7 +32,12 @@ OUT = Path("data.json")
 TABLES = [
     ("TAB1625", "population"),
     ("TAB6473", "population"),
-    ("TAB6260", "labour"),
+    # BAS uses 15–74 for the employment measures, while SCB documents
+    # unemployment/related labour-force measures on 16–64 in its BAS
+    # reporting. We therefore query TAB6260 twice with the appropriate
+    # age group and only retain the relevant series from each query.
+    ("TAB6260", "labour_15_74"),
+    ("TAB6260", "labour_16_64"),
 ]
 
 S = requests.Session()
@@ -292,6 +297,28 @@ def choose_non_region_values(v: dict, kind: str) -> list[str]:
     # A first-category fallback is what previously selected age 15-19 in
     # TAB6260 and produced the wrong "Sysselsatta" series.
     if is_classification_dimension(v):
+        # TAB6260 has different useful age universes for different measures.
+        # For the two labour queries explicitly request the documented age
+        # group instead of using the generic aggregate heuristic.
+        if is_age_dimension(v) and kind == "labour_15_74":
+            wanted = [
+                "15-74 ar", "15-74", "15 ar och aldre"
+            ]
+            for code0, label0 in pairs:
+                if norm(label0) in wanted:
+                    return [code0]
+            for code0, label0 in pairs:
+                if "15-74" in norm(label0):
+                    return [code0]
+        if is_age_dimension(v) and kind == "labour_16_64":
+            wanted = ["16-64 ar", "16-64"]
+            for code0, label0 in pairs:
+                if norm(label0) in wanted:
+                    return [code0]
+            for code0, label0 in pairs:
+                if "16-64" in norm(label0):
+                    return [code0]
+
         total = total_value(v, strict=True)
         if total is None:
             raise RuntimeError(
@@ -589,6 +616,15 @@ def add_rows_to_values(rows, vars_, kind, values, communes, periods, measure_map
         else:
             vid = classify_labour_row(row, vars_, measure_map)
 
+            # Keep the two TAB6260 age universes separate.
+            if kind == "labour_15_74" and vid not in {"employed", "employment_rate"}:
+                continue
+            if kind == "labour_16_64" and vid not in {
+                "unemployed", "labour_force", "unemployment_rate",
+                "participation_rate"
+            }:
+                continue
+
         if not vid:
             continue
 
@@ -725,7 +761,7 @@ def process_table(tid, kind, values, communes, periods, source_ranges):
         rows = jsonstat_rows(obj)
 
         print(f"Returned cells: {len(rows)}")
-        if kind == "labour" and rows:
+        if kind.startswith("labour") and rows:
             from collections import Counter
             measure_counts = Counter()
             measure_labels = {}
@@ -785,7 +821,8 @@ def main():
             process_table(
                 tid, kind, values, communes, periods, source_ranges
             )
-            loaded.append(tid)
+            if tid not in loaded:
+                loaded.append(tid)
 
             sources.append({
                 "name": f"SCB tabell {tid}",
@@ -818,10 +855,6 @@ def main():
         n_communes = len(values[vid])
         print(f"  {vid}: {n_obs} observations across {n_communes} municipalities")
 
-    # Diagnostic only: do not fail the build here.  TAB6260 is returning 12,180
-    # non-null cells per six-month request although 11 contents were selected.
-    # That is exactly 7 * 290 * 6, so we need to see which ContentsCode values
-    # actually contain numeric data before making another classification change.
     required_series = {
         "population", "population_growth", "employed", "unemployed",
         "labour_force", "employment_rate", "unemployment_rate",
@@ -829,8 +862,10 @@ def main():
     }
     missing_series = sorted(required_series - set(values))
     if missing_series:
-        print("\nWARNING: Required series currently missing:", ", ".join(missing_series))
-        print("The build is intentionally continuing so the raw TAB6260 measure availability can be diagnosed.")
+        raise RuntimeError(
+            "Required analysis series missing after TAB6260 age-specific extraction: "
+            + ", ".join(missing_series)
+        )
 
     result = {
         "generated_at": time.strftime(
