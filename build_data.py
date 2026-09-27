@@ -516,7 +516,7 @@ def add_rows_to_values(rows, vars_, kind, values, communes, periods):
         if kind == "population":
             vid = classify_population_row(row, vars_)
         else:
-            vid = classify_labour_row(row)
+            vid = classify_labour_row(row, vars_)
 
         if not vid:
             continue
