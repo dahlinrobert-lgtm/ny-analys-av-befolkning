@@ -36,12 +36,13 @@ TABLES = [
 ]
 
 S = requests.Session()
-S.headers.update({"User-Agent": "kommunal-tillvaxtanalys/3.0"})
+S.headers.update({"User-Agent": "kommunal-tillvaxtanalys/4.0"})
 
 
 def norm(s: object) -> str:
     s = unicodedata.normalize("NFKD", str(s))
     s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.replace("–", "-").replace("—", "-").replace("−", "-")
     return re.sub(r"\s+", " ", s.strip().lower())
 
 
@@ -281,10 +282,11 @@ def choose_non_region_values(v: dict, kind: str) -> list[str]:
             return [c for c, _ in chosen]
         return [pairs[0][0]]
 
-    # ContentsCode is usually a unit/measure dimension. Select all if small,
-    # otherwise the first value. This keeps the cell count manageable.
-    if "contents" in code or "innehall" in label or "matt" in label:
-        return [c for c, _ in pairs[:3]]
+    # ContentsCode is the measure dimension in TAB6260. Select every measure.
+    # The request is chunked by six months, so 290 municipalities x 6 months
+    # x 11 measures stays comfortably below SCB's 150,000-cell limit.
+    if "contents" in code or "innehall" in label or "matt" in label or "tabellinnehall" in label:
+        return [c for c, _ in pairs]
 
     # For classification dimensions, NEVER fall back to the first category.
     # A first-category fallback is what previously selected age 15-19 in
@@ -462,29 +464,34 @@ def classify_population_row(row: dict, vars_: list[dict]) -> str | None:
     return None
 
 
-def classify_labour_row(row: dict) -> str | None:
-    text = " ".join(
+def classify_labour_row(row: dict, vars_: list[dict]) -> str | None:
+    """Map TAB6260's table-content measures to stable application IDs.
+
+    Match the measure label, not arbitrary substrings elsewhere in the row.
+    In particular, ``antal sysselsatta och arbetslösa (arbetskraften)`` must
+    become labour_force rather than employed.
+    """
+    labels = [
         str(v) for k, v in row.items()
         if k.endswith("_text")
-    )
-    n = norm(text)
-
-    # More specific phrases first.
-    rules = [
-        ("sysselsattningsgrad", "employment_rate"),
-        ("arbetsloshet", "unemployment_rate"),
-        ("arbetskraftsdeltagande", "participation_rate"),
-        ("sysselsatta", "employed"),
-        ("arbetslosa", "unemployed"),
-        ("arbetskraft", "labour_force"),
     ]
+    n = " ".join(norm(v) for v in labels)
 
-    for needle, out in rules:
-        if needle in n:
-            return out
+    # Most important/specific categories first.
+    if "sysselsatta och arbetslosa" in n or "arbetskraften" in n:
+        return "labour_force"
+    if "sysselsattningsgrad" in n:
+        return "employment_rate"
+    if "arbetskraftsdeltagande" in n:
+        return "participation_rate"
+    if "arbetsloshet" in n:
+        return "unemployment_rate"
+    if re.search(r"\bantal arbetslosa\b", n):
+        return "unemployed"
+    if re.search(r"\bantal sysselsatta\b", n):
+        return "employed"
 
     return None
-
 
 def add_rows_to_values(rows, vars_, kind, values, communes, periods):
     rd, td = detect_region_time(rows, vars_)
@@ -687,6 +694,7 @@ def main():
     sources = []
     loaded = []
 
+    errors = {}
     for tid, kind in TABLES:
         try:
             process_table(
@@ -704,16 +712,32 @@ def main():
             })
 
         except Exception as e:
-            print(f"ERROR {tid}: {type(e).__name__}: {e}")
+            errors[tid] = f"{type(e).__name__}: {e}"
+            print(f"ERROR {tid}: {errors[tid]}")
+
+    # All three tables are required for this application's current analysis.
+    # Never publish a green build containing only population data.
+    required = {tid for tid, _ in TABLES}
+    missing = sorted(required - set(loaded))
+    if missing:
+        detail = "; ".join(f"{tid}: {errors.get(tid, 'not loaded')}" for tid in missing)
+        raise RuntimeError(
+            "Required SCB table(s) failed to load: " + detail
+        )
 
     variables = variable_metadata(values, source_ranges)
 
-    # Population is the target variable in the HTML app. If it is missing,
-    # fail loudly rather than producing another misleading green/empty build.
-    if not values.get("population"):
+    # Require the core analysis series as well as the tables themselves.
+    required_series = {
+        "population", "population_growth", "employed", "unemployed",
+        "labour_force", "employment_rate", "unemployment_rate",
+        "participation_rate",
+    }
+    missing_series = sorted(required_series - set(values))
+    if missing_series:
         raise RuntimeError(
-            "No population observations were extracted. "
-            "The Action must fail instead of publishing empty data.json."
+            "Required analysis series missing from SCB extraction: "
+            + ", ".join(missing_series)
         )
 
     result = {
@@ -746,6 +770,7 @@ def main():
         n = sum(len(x) for x in by_commune.values())
         print(f"  {k}: {n}")
     print("Tables loaded:", loaded)
+    print("Required series present:", sorted(required_series))
 
 
 if __name__ == "__main__":
