@@ -216,8 +216,16 @@ def choose_non_region_values(v: dict, kind: str) -> list[str]:
         return [c for c, _ in pairs]
 
     if "forandring" in code or "förändring" in label:
+        # For the two monthly population tables the relevant SCB codes are
+        # stable: 100 = folkmängd and 110 = folkökning.  Use the codes first
+        # and text matching only as a fallback, because JSON-stat labels can
+        # differ between API responses.
+        codes = {c for c, _ in pairs}
+        if {"100", "110"}.issubset(codes):
+            return ["100", "110"]
+
         wanted = [
-            "folkmangd", "folkning", "folk okning",
+            "folkmangd", "folk okning",
             "fodelse", "dod", "flytt", "invandr", "utvand",
         ]
         chosen = [(c, t) for c, t in pairs
@@ -335,9 +343,23 @@ def detect_region_time(rows: list[dict], vars_: list[dict]):
 
 
 def classify_population_row(row: dict, vars_: list[dict]) -> str | None:
+    """Map SCB monthly population rows to stable application IDs.
+
+    The current monthly tables use the Forandringar dimension where:
+      100 = folkmängd
+      110 = folkökning
+    The code-based mapping is authoritative for these two measures; text is
+    retained as a fallback for the other population-change categories.
     """
-    Map population table's change/measure labels to stable app IDs.
-    """
+    # Code-based mapping first.  This avoids depending on translated labels.
+    for key in ("Forandringar", "Förändringar", "forandringar"):
+        if key in row:
+            code = str(row[key])
+            if code == "100":
+                return "population"
+            if code == "110":
+                return "population_growth"
+
     text = " ".join(
         str(v) for k, v in row.items()
         if k.endswith("_text")
@@ -360,11 +382,6 @@ def classify_population_row(row: dict, vars_: list[dict]) -> str | None:
     for needle, out in rules:
         if needle in n:
             return out
-
-    # Some tables expose population as the only measure without a descriptive
-    # change label.
-    if "population" in n or "folkmangd" in n:
-        return "population"
 
     return None
 
@@ -560,9 +577,15 @@ def process_table(tid, kind, values, communes, periods, source_ranges):
         after = sum(len(cm) for cm in values.get("population", {}).values())
 
         if rows:
-            # Show a small diagnostic sample on the first successful call.
+            # Show diagnostics for the first returned cell and the population
+            # measure codes when this is a population table.
             sample = rows[0]
             print("Sample:", sample)
+            if kind == "population":
+                fd = next((k for k in ("Forandringar", "Förändringar", "forandringar") if k in sample), None)
+                if fd:
+                    seen = sorted({(str(r.get(fd)), str(r.get(fd + "_text", ""))) for r in rows})
+                    print("Population measure codes returned:", seen)
 
         time.sleep(0.25)
 
