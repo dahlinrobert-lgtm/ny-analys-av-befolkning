@@ -1,334 +1,653 @@
 """
-Build normalized monthly municipal data for Kommunal tillväxtanalys.
+Build data.json for Kommunal tillväxtanalys.
 
-SCB source: PxWebApi v2.
-The output is deliberately shaped to match index.html:
-  periods, communes, variables, values, sources.
+SCB PxWebApi v2:
+  https://statistikdatabasen.scb.se/api/v2
 
-Core monthly municipal tables:
-  TAB1625  population 2000-2024
-  TAB6473  population 2025-
-  TAB6260  labour market status, preliminary
-  TAB4718  ongoing employments by region
-  TAB4723  ongoing employments in business sector by region/industry
+Important:
+PxWebApi v2 metadata returns table variables, while JSON-stat data returns
+dimensions. This script deliberately handles both structures.
+
+The web app expects:
+  communes, periods, variables, values, sources
+
+No SCB v1 endpoint is used.
 """
 
 from __future__ import annotations
-import json, re, time, unicodedata
+
+import json
+import re
+import time
+import unicodedata
 from pathlib import Path
 from urllib.parse import quote
+
 import requests
 
 API = "https://statistikdatabasen.scb.se/api/v2"
 OUT = Path("data.json")
-S = requests.Session()
-S.headers.update({"User-Agent": "kommunal-tillvaxtanalys/2.0"})
 
+# These are the municipal monthly tables we actually want to use.
 TABLES = [
-    ("TAB1625", "Befolkningsstatistik efter region och kön. Månad 2000M01–2024M12", "population"),
-    ("TAB6473", "Befolkningsstatistik efter region och kön. Månad 2025M01–senaste", "population"),
-    ("TAB6260", "Arbetsmarknadsstatus efter region, kön, ålder och födelseregion. Preliminär statistik. Månad", "labour"),
-    ("TAB4718", "Antal pågående anställningar efter kön, region och sektor. Månad", "employment"),
-    ("TAB4723", "Antal pågående anställningar i näringslivet efter region och näringsgren. Månad", "industry"),
+    ("TAB1625", "population_old"),
+    ("TAB6473", "population_new"),
+    ("TAB6260", "labour"),
 ]
 
-def norm(s):
-    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode("ascii")
+S = requests.Session()
+S.headers.update({"User-Agent": "kommunal-tillvaxtanalys/3.0"})
+
+
+def norm(s: object) -> str:
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(c for c in s if not unicodedata.combining(c))
     return re.sub(r"\s+", " ", s.strip().lower())
 
-def get(url, **params):
+
+def get(url: str, **params):
     r = S.get(url, params=params, timeout=90)
     r.raise_for_status()
     return r
 
-def post(url, payload):
-    r = S.post(url, params={"lang": "sv", "outputFormat": "json-stat2"},
-               json=payload, timeout=180)
-    r.raise_for_status()
+
+def post_data(tid: str, payload: dict):
+    r = S.post(
+        f"{API}/tables/{quote(tid, safe='')}/data",
+        params={"lang": "sv", "outputFormat": "json-stat2"},
+        json=payload,
+        timeout=180,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"{r.status_code}: {r.text[:1000]}")
     return r.json()
 
-def metadata(tid):
-    return get(f"{API}/tables/{quote(tid, safe='')}/metadata", lang="sv").json()
 
-def dims(meta):
-    return meta.get("dimension") or {}
+def metadata(tid: str) -> dict:
+    return get(
+        f"{API}/tables/{quote(tid, safe='')}/metadata",
+        lang="sv",
+    ).json()
 
-def codes_labels(d):
-    cat = (d.get("category") or {})
-    idx = cat.get("index") or {}
-    labels = cat.get("label") or {}
-    if isinstance(idx, list):
-        codes = idx
-    else:
-        codes = [k for k, _ in sorted(idx.items(), key=lambda kv: kv[1])]
-    return [(str(c), str(labels.get(c, c))) for c in codes]
 
-def role_first(meta, key):
-    r = meta.get("role") or {}
-    x = r.get(key)
-    if isinstance(x, list):
-        return x[0] if x else None
-    return x
+def variables_from_metadata(meta: dict) -> list[dict]:
+    """
+    PxWebApi v2 metadata normally exposes variables as:
+      {"variables":[{"code":...,"text":...,"values":[...],"valueTexts":[...]}]}
+    Older/alternate responses can expose dimensions instead.
+    """
+    vars_ = meta.get("variables")
+    if isinstance(vars_, list):
+        return vars_
 
-def find_dim(meta, words, preferred_codes=()):
-    for code, d in dims(meta).items():
-        n = norm(d.get("label", code))
-        if code in preferred_codes or any(w in n for w in words):
-            return code
+    dims = meta.get("dimension")
+    if isinstance(dims, dict):
+        out = []
+        for code, d in dims.items():
+            cat = d.get("category") or {}
+            idx = cat.get("index") or {}
+            labels = cat.get("label") or {}
+            if isinstance(idx, dict):
+                ordered = [k for k, _ in sorted(idx.items(), key=lambda kv: kv[1])]
+            else:
+                ordered = list(idx)
+            out.append({
+                "code": code,
+                "text": d.get("label", code),
+                "values": ordered,
+                "valueTexts": [labels.get(k, k) for k in ordered] if isinstance(labels, dict) else ordered,
+                "elimination": (d.get("extension") or {}).get("elimination", False),
+            })
+        return out
+
+    return []
+
+
+def var_code(v: dict) -> str:
+    return str(v.get("code") or v.get("variableCode") or v.get("id") or "")
+
+
+def var_text(v: dict) -> str:
+    return str(v.get("text") or v.get("label") or v.get("name") or var_code(v))
+
+
+def var_pairs(v: dict) -> list[tuple[str, str]]:
+    vals = v.get("values") or v.get("valueCodes") or []
+    texts = v.get("valueTexts") or v.get("valueLabels") or []
+
+    if isinstance(vals, dict):
+        vals = list(vals.keys())
+    vals = [str(x) for x in vals]
+
+    if isinstance(texts, dict):
+        texts = [texts.get(x, x) for x in vals]
+    texts = [str(x) for x in texts]
+
+    if len(texts) != len(vals):
+        texts = vals[:]
+
+    return list(zip(vals, texts))
+
+
+def is_eliminable(v: dict) -> bool:
+    return bool(v.get("elimination") is True)
+
+
+def find_variable(vars_: list[dict], *needles: str) -> dict | None:
+    ns = [norm(x) for x in needles]
+    for v in vars_:
+        t = norm(var_text(v))
+        c = norm(var_code(v))
+        if any(n in t or n == c for n in ns):
+            return v
     return None
 
-def get_region_dim(meta):
-    r = role_first(meta, "geo")
-    return r if r in dims(meta) else find_dim(meta, ["region", "kommun"], ("Region", "region"))
 
-def get_time_dim(meta):
-    t = role_first(meta, "time")
-    return t if t in dims(meta) else find_dim(meta, ["manad", "month", "tid"], ("Tid", "tid", "månad"))
+def identify_dims(vars_: list[dict]):
+    region = find_variable(vars_, "region", "kommun")
+    time = find_variable(vars_, "tid", "månad", "month")
 
-def get_metric_dim(meta):
-    r = role_first(meta, "metric")
-    return r if r in dims(meta) else find_dim(
-        meta, ["tabellinnehall", "contents", "forandringar", "forandring", "nyckeltal", "matt"],
-        ("ContentsCode", "Forandringar", "tabellinnehåll")
-    )
+    # Prefer exact SCB codes where present.
+    for v in vars_:
+        c = var_code(v)
+        if c.lower() == "region":
+            region = v
+        if c.lower() in {"tid", "månad", "month"}:
+            time = v
 
-def choose_municipalities(meta, region_dim):
+    return region, time
+
+
+def municipal_regions(region_var: dict):
     out = []
-    for c, label in codes_labels(dims(meta)[region_dim]):
+    for code, label in var_pairs(region_var):
         m = re.match(r"^\s*(\d{4})\b", label)
         if m:
-            out.append((c, label))
-        elif re.fullmatch(r"\d{4}", c):
-            out.append((c, label))
+            out.append((code, m.group(1), label))
+            continue
+        if re.fullmatch(r"\d{4}", code):
+            out.append((code, code, label))
     return out
 
-def dim_eliminated(d):
-    return bool((d.get("extension") or {}).get("elimination", False))
 
-def choose_dimension_values(code, d):
-    pairs = codes_labels(d)
+def total_value(v: dict) -> str | None:
+    pairs = var_pairs(v)
+    if not pairs:
+        return None
+
+    preferred = [
+        "totalt", "samtliga", "alla", "total",
+        "bada kon", "bada kön", "båda",
+        "totsa", "totsa", "tot",
+    ]
+
+    for code, label in pairs:
+        n = norm(label)
+        nc = norm(code)
+        if any(p in n or p == nc for p in preferred):
+            return code
+
+    # Common SCB total codes.
+    for code, _ in pairs:
+        if norm(code) in {"totsa", "tot", "total"}:
+            return code
+
+    return pairs[0][0]
+
+
+def choose_non_region_values(v: dict, kind: str) -> list[str]:
+    """
+    Choose sensible values for mandatory dimensions.
+
+    - sex/age/birth-region/sector: total
+    - labour-market status: all categories
+    - population change: useful population measures
+    - contents code: normally the first/total measure
+    """
+    code = norm(var_code(v))
+    label = norm(var_text(v))
+    pairs = var_pairs(v)
+
     if not pairs:
         return []
 
-    # Prefer an explicit total for dimensions such as sex, age, sector and birth region.
-    preferred = ["totalt", "samtliga", "alla", "total", "bada kon", "bada"]
-    for c, label in pairs:
-        n = norm(label)
-        if any(p in n for p in preferred):
-            return [c]
-
-    # For industry dimensions, retaining all categories is useful and still fits
-    # the six-month batching used below.
-    ncode = norm(code)
-    nlabel = norm(d.get("label", code))
-    if any(x in (ncode + " " + nlabel) for x in ["naring", "sni", "industry"]):
+    if any(x in (code + " " + label)
+           for x in ["arbetsmarknadsstatus", "status"]):
         return [c for c, _ in pairs]
 
-    # If there is no obvious total, use the first category rather than silently
-    # multiplying the result by every possible breakdown.
-    return [pairs[0][0]]
+    if "forandring" in code or "förändring" in label:
+        wanted = [
+            "folkmangd", "folkning", "folk okning",
+            "fodelse", "dod", "flytt", "invandr", "utvand",
+        ]
+        chosen = [(c, t) for c, t in pairs
+                  if any(w in norm(t) for w in wanted)]
+        if chosen:
+            return [c for c, _ in chosen]
+        return [pairs[0][0]]
 
-def choose_metric_pairs(meta, metric_dim, kind):
-    pairs = codes_labels(dims(meta)[metric_dim])
-    if kind == "population":
-        wanted_words = [
-            "folkmangd", "folk okning", "folkning", "fodd", "doda",
-            "fodelseoverskott", "inrikes inflytt", "inrikes utflytt",
-            "invandr", "utvand", "flyttningsoverskott", "justeringspost"
-        ]
-    elif kind == "labour":
-        wanted_words = [
-            "sysselsatta", "arbetslosa", "arbetskraft", "arbetsloshet",
-            "arbetskraftsdeltagande", "sysselsattningsgrad", "personer ej"
-        ]
-    else:
-        wanted_words = ["antal pagaende anstallningar", "arlig forandring"]
+    # ContentsCode is usually a unit/measure dimension. Select all if small,
+    # otherwise the first value. This keeps the cell count manageable.
+    if "contents" in code or "innehall" in label or "matt" in label:
+        return [c for c, _ in pairs[:3]]
 
-    selected = []
-    for c, label in pairs:
-        n = norm(label)
-        if any(w in n for w in wanted_words):
-            selected.append((c, label))
-    return selected or pairs[:1]
+    # For common breakdown dimensions, use the total.
+    if any(x in (code + " " + label) for x in [
+        "kon", "sex", "alder", "ålder", "fodelseregion",
+        "fodelseregion", "sektor", "sector"
+    ]):
+        return [total_value(v)]
 
-def safe_id(kind, label):
-    n = norm(label)
-    if kind == "population":
-        mapping = [
-            ("folkmangd", "population"),
-            ("folk okning", "population_growth"),
-            ("fodelseoverskott", "birth_surplus"),
-            ("fodd", "births"),
-            ("doda", "deaths"),
-            ("samtliga inrikes inflytt", "domestic_in_migration"),
-            ("inrikes inflytt", "domestic_in_migration"),
-            ("samtliga inrikes utflytt", "domestic_out_migration"),
-            ("inrikes utflytt", "domestic_out_migration"),
-            ("invandringsoverskott", "net_immigration"),
-            ("invandring", "immigration"),
-            ("utvandring", "emigration"),
-            ("flyttningsoverskott", "net_migration"),
-            ("justeringspost", "population_adjustment"),
-        ]
-    elif kind == "labour":
-        mapping = [
-            ("antal sysselsatta", "employed"),
-            ("sysselsattningsgrad", "employment_rate"),
-            ("antal arbetslosa", "unemployed"),
-            ("arbetsloshet", "unemployment_rate"),
-            ("antal sysselsatta och arbetslosa", "labour_force"),
-            ("arbetskraftsdeltagande", "participation_rate"),
-            ("antal personer ej i arbetskraften", "outside_labour_force"),
-            ("antal totalt", "population_labour"),
-        ]
-    else:
-        mapping = [
-            ("antal pagaende anstallningar", "jobs"),
-            ("arlig forandring", "jobs_yoy_pct"),
-        ]
-    for needle, out in mapping:
-        if needle in n:
-            return out
-    return re.sub(r"[^a-z0-9]+", "_", n).strip("_")[:60]
+    # If the table has an unknown mandatory dimension, use a total when one
+    # exists; otherwise the first value. This is safer than multiplying
+    # every dimension silently.
+    return [total_value(v)]
 
-def jsonstat_rows(obj):
+
+def choose_selections(tid: str, vars_: list[dict], regions, times, kind):
+    region_var, time_var = identify_dims(vars_)
+    if not region_var or not time_var:
+        raise RuntimeError("Could not identify Region and Tid variables")
+
+    selection = [
+        {
+            "variableCode": var_code(region_var),
+            "valueCodes": [x[0] for x in regions],
+        },
+        {
+            "variableCode": var_code(time_var),
+            "valueCodes": times,
+        },
+    ]
+
+    for v in vars_:
+        c = var_code(v)
+        if c in {var_code(region_var), var_code(time_var)}:
+            continue
+        if is_eliminable(v):
+            continue
+
+        vals = choose_non_region_values(v, kind)
+        if not vals:
+            raise RuntimeError(
+                f"No values selected for mandatory variable {c} ({var_text(v)})"
+            )
+        selection.append({"variableCode": c, "valueCodes": vals})
+
+    return selection
+
+
+def jsonstat_rows(obj: dict) -> list[dict]:
+    """
+    Decode JSON-stat2 into one tidy row per cell.
+    """
     ids = obj.get("id") or []
     sizes = obj.get("size") or []
-    dimensions = obj.get("dimension") or {}
-    vals = obj.get("value") or []
+    dims = obj.get("dimension") or {}
+    values = obj.get("value") or []
+
     cats = {}
     for d in ids:
-        cat = (dimensions.get(d) or {}).get("category") or {}
+        cat = (dims.get(d) or {}).get("category") or {}
         idx = cat.get("index") or {}
         labels = cat.get("label") or {}
-        ordered = idx if isinstance(idx, list) else [k for k, _ in sorted(idx.items(), key=lambda kv: kv[1])]
-        cats[d] = [(str(c), str(labels.get(c, c))) for c in ordered]
+
+        if isinstance(idx, list):
+            codes = idx
+        else:
+            codes = [k for k, _ in sorted(idx.items(), key=lambda kv: kv[1])]
+
+        cats[d] = [
+            (str(c), str(labels.get(c, c)) if isinstance(labels, dict) else str(c))
+            for c in codes
+        ]
 
     rows = []
     if not ids or not sizes:
         return rows
-    for flat, value in enumerate(vals):
+
+    for flat, value in enumerate(values):
         if value is None:
             continue
+
         rem = flat
-        coord = [0] * len(ids)
+        coords = [0] * len(ids)
+
         for i in range(len(ids) - 1, -1, -1):
-            coord[i] = rem % sizes[i]
+            coords[i] = rem % sizes[i]
             rem //= sizes[i]
+
         row = {"value": value}
+
         for i, d in enumerate(ids):
-            code, label = cats[d][coord[i]]
+            code, label = cats[d][coords[i]]
             row[d] = code
             row[d + "_text"] = label
+
         rows.append(row)
+
     return rows
 
-def query_table(tid, meta, kind):
-    rd, td, md = get_region_dim(meta), get_time_dim(meta), get_metric_dim(meta)
-    if not rd or not td or not md:
-        raise RuntimeError(f"Could not identify region/time/metric: {rd}, {td}, {md}")
 
-    regions = choose_municipalities(meta, rd)
-    times = codes_labels(dims(meta)[td])
-    metrics = choose_metric_pairs(meta, md, kind)
-    if not regions or not times or not metrics:
-        raise RuntimeError("Missing municipalities, periods or metrics")
+def detect_region_time(rows: list[dict], vars_: list[dict]):
+    region, time = identify_dims(vars_)
+    return var_code(region), var_code(time)
 
-    rows = []
-    for start in range(0, len(times), 6):
-        tchunk = [c for c, _ in times[start:start+6]]
-        selection = [
-            {"variableCode": rd, "valueCodes": [c for c, _ in regions]},
-            {"variableCode": td, "valueCodes": tchunk},
-            {"variableCode": md, "valueCodes": [c for c, _ in metrics]},
-        ]
 
-        for code, d in dims(meta).items():
-            if code in {rd, td, md} or dim_eliminated(d):
+def classify_population_row(row: dict, vars_: list[dict]) -> str | None:
+    """
+    Map population table's change/measure labels to stable app IDs.
+    """
+    text = " ".join(
+        str(v) for k, v in row.items()
+        if k.endswith("_text")
+    )
+    n = norm(text)
+
+    rules = [
+        ("fodelseoverskott", "birth_surplus"),
+        ("folk okning", "population_growth"),
+        ("folkmangd", "population"),
+        ("fodd", "births"),
+        ("doda", "deaths"),
+        ("inrikes inflytt", "domestic_in_migration"),
+        ("inrikes utflytt", "domestic_out_migration"),
+        ("invandring", "immigration"),
+        ("utvandring", "emigration"),
+        ("flyttningsoverskott", "net_migration"),
+    ]
+
+    for needle, out in rules:
+        if needle in n:
+            return out
+
+    # Some tables expose population as the only measure without a descriptive
+    # change label.
+    if "population" in n or "folkmangd" in n:
+        return "population"
+
+    return None
+
+
+def classify_labour_row(row: dict) -> str | None:
+    text = " ".join(
+        str(v) for k, v in row.items()
+        if k.endswith("_text")
+    )
+    n = norm(text)
+
+    # More specific phrases first.
+    rules = [
+        ("sysselsattningsgrad", "employment_rate"),
+        ("arbetsloshet", "unemployment_rate"),
+        ("arbetskraftsdeltagande", "participation_rate"),
+        ("sysselsatta", "employed"),
+        ("arbetslosa", "unemployed"),
+        ("arbetskraft", "labour_force"),
+    ]
+
+    for needle, out in rules:
+        if needle in n:
+            return out
+
+    return None
+
+
+def add_rows_to_values(rows, vars_, kind, values, communes, periods):
+    rd, td = detect_region_time(rows, vars_)
+
+    for row in rows:
+        region_text = str(row.get(rd + "_text", row.get(rd, "")))
+        m = re.match(r"^\s*(\d{4})\b", region_text)
+        if not m:
+            # Sometimes JSON-stat gives the municipality code directly.
+            raw = str(row.get(rd, ""))
+            if re.fullmatch(r"\d{4}", raw):
+                code = raw
+            else:
                 continue
-            vals = choose_dimension_values(code, d)
-            if vals:
-                selection.append({"variableCode": code, "valueCodes": vals})
+        else:
+            code = m.group(1)
 
-        obj = post(f"{API}/tables/{quote(tid, safe='')}/data", {"selection": selection})
-        rows.extend(jsonstat_rows(obj))
-        print(f"  {tid}: months {start+1}-{min(start+6,len(times))}/{len(times)}; rows={len(rows)}")
+        time_code = str(row.get(td, ""))
+        if not re.fullmatch(r"\d{4}M\d{2}", time_code):
+            continue
+
+        if kind == "population":
+            vid = classify_population_row(row, vars_)
+        else:
+            vid = classify_labour_row(row)
+
+        if not vid:
+            continue
+
+        value = row.get("value")
+        if isinstance(value, bool):
+            continue
+
+        try:
+            value = float(value)
+            if value.is_integer():
+                value = int(value)
+        except (TypeError, ValueError):
+            continue
+
+        values.setdefault(vid, {}).setdefault(code, {})[time_code] = value
+        periods.add(time_code)
+
+
+def variable_metadata(values, source_ranges):
+    names = {
+        "population": "Folkmängd",
+        "population_growth": "Folkökning",
+        "birth_surplus": "Födelseöverskott",
+        "births": "Födda",
+        "deaths": "Döda",
+        "domestic_in_migration": "Inrikes inflyttning",
+        "domestic_out_migration": "Inrikes utflyttning",
+        "immigration": "Invandring",
+        "emigration": "Utvandring",
+        "net_migration": "Flyttningsöverskott",
+        "employed": "Sysselsatta",
+        "unemployed": "Arbetslösa",
+        "labour_force": "Arbetskraft",
+        "employment_rate": "Sysselsättningsgrad",
+        "unemployment_rate": "Arbetslöshet",
+        "participation_rate": "Arbetskraftsdeltagande",
+    }
+
+    groups = {
+        "population": "Befolkning",
+        "population_growth": "Befolkning",
+        "birth_surplus": "Befolkning",
+        "births": "Befolkning",
+        "deaths": "Befolkning",
+        "domestic_in_migration": "Migration",
+        "domestic_out_migration": "Migration",
+        "immigration": "Migration",
+        "emigration": "Migration",
+        "net_migration": "Migration",
+        "employed": "Arbetsmarknad",
+        "unemployed": "Arbetsmarknad",
+        "labour_force": "Arbetsmarknad",
+        "employment_rate": "Arbetsmarknad",
+        "unemployment_rate": "Arbetsmarknad",
+        "participation_rate": "Arbetsmarknad",
+    }
+
+    out = []
+
+    for vid, by_commune in values.items():
+        periods = sorted(
+            t for cm in by_commune.values()
+            for t in cm
+        )
+        if not periods:
+            continue
+
+        out.append({
+            "id": vid,
+            "name": names.get(vid, vid),
+            "group": groups.get(vid, "Övrigt"),
+            "tags": source_ranges.get(vid, []),
+            "from": min(periods),
+            "to": max(periods),
+        })
+
+    return out
+
+
+def process_table(tid, kind, values, communes, periods, source_ranges):
+    print(f"\n=== {tid} / {kind} ===")
+
+    meta = metadata(tid)
+    title = (
+        meta.get("title")
+        or meta.get("text")
+        or meta.get("label")
+        or tid
+    )
+
+    vars_ = variables_from_metadata(meta)
+    if not vars_:
+        raise RuntimeError("No variables found in metadata")
+
+    print("Variables:")
+    for v in vars_:
+        print(
+            f"  {var_code(v)} | {var_text(v)} | "
+            f"n={len(var_pairs(v))} | elimination={is_eliminable(v)}"
+        )
+
+    region_var, time_var = identify_dims(vars_)
+    if not region_var or not time_var:
+        raise RuntimeError("Region/Tid not found")
+
+    regions = municipal_regions(region_var)
+    times = [c for c, _ in var_pairs(time_var)]
+
+    print(f"Municipal region candidates: {len(regions)}")
+    print(f"Periods in table: {len(times)}")
+
+    if not regions:
+        raise RuntimeError("No four-digit municipal region codes found")
+
+    # Use six months per call. 290 municipalities x 6 months is small enough
+    # for the 150,000-cell limit for the selected dimensions.
+    for start in range(0, len(times), 6):
+        tchunk = times[start:start + 6]
+
+        selection = choose_selections(
+            tid, vars_, regions, tchunk, kind
+        )
+        payload = {"selection": selection}
+
+        print(
+            f"Query {start + 1}-{min(start + 6, len(times))}/"
+            f"{len(times)}; selections="
+            f"{[(x['variableCode'], len(x['valueCodes'])) for x in selection]}"
+        )
+
+        obj = post_data(tid, payload)
+        rows = jsonstat_rows(obj)
+
+        print(f"Returned cells: {len(rows)}")
+
+        before = sum(len(cm) for cm in values.get("population", {}).values())
+        add_rows_to_values(
+            rows, vars_, kind, values, communes, periods
+        )
+        after = sum(len(cm) for cm in values.get("population", {}).values())
+
+        if rows:
+            # Show a small diagnostic sample on the first successful call.
+            sample = rows[0]
+            print("Sample:", sample)
+
         time.sleep(0.25)
 
-    return rows, rd, td, md, regions, metrics
+    # Register municipal names from metadata.
+    for _, code, label in regions:
+        name = re.sub(r"^\s*\d{4}\s*:?\s*", "", label).strip()
+        communes[code] = name
+
+    # Record source tag for each stable variable.
+    for vid in values:
+        source_ranges.setdefault(vid, [])
+        if tid not in source_ranges[vid]:
+            source_ranges[vid].append(tid)
+
+    print(f"Finished {tid}")
+
 
 def main():
-    values, variables = {}, {}
-    commune_map, all_periods = {}, set()
-    sources, loaded = [], []
+    values = {}
+    communes = {}
+    periods = set()
+    source_ranges = {}
+    sources = []
+    loaded = []
 
-    for tid, fallback_title, kind in TABLES:
+    for tid, kind in TABLES:
         try:
-            print(f"\nMETADATA {tid}")
-            meta = metadata(tid)
-            title = meta.get("label") or meta.get("title") or fallback_title
-            rows, rd, td, md, regions, metrics = query_table(tid, meta, kind)
-            print(f"  fetched {len(rows)} rows")
+            process_table(
+                tid, kind, values, communes, periods, source_ranges
+            )
+            loaded.append(tid)
 
             sources.append({
-                "name": f"SCB {title} ({tid})",
-                "url": f"https://www.statistikdatabasen.scb.se/pxweb/sv/ssd/",
+                "name": f"SCB tabell {tid}",
+                "url": (
+                    "https://statistikdatabasen.scb.se/"
+                    f"api/v2/tables/{tid}/metadata?lang=sv"
+                ),
                 "note": "Hämtad via PxWebApi v2."
             })
 
-            for c, label in regions:
-                m = re.match(r"^\s*(\d{4})\b", label)
-                if m:
-                    code = m.group(1)
-                    commune_map[code] = re.sub(r"^\s*\d{4}\s*:?\s*", "", label).strip() or label
-
-            for mc, mlabel in metrics:
-                var_id = safe_id(kind, mlabel)
-                bucket = values.setdefault(var_id, {})
-                for row in rows:
-                    if row.get(md) != mc:
-                        continue
-                    txt = str(row.get(rd + "_text", row.get(rd, "")))
-                    m = re.match(r"^\s*(\d{4})\b", txt)
-                    if not m:
-                        continue
-                    code, t = m.group(1), str(row.get(td))
-                    if re.fullmatch(r"\d{4}M\d{2}", t):
-                        all_periods.add(t)
-                        bucket.setdefault(code, {})[t] = row.get("value")
-
-                if bucket:
-                    ps = [t for cm in bucket.values() for t in cm]
-                    variables[var_id] = {
-                        "id": var_id,
-                        "name": mlabel,
-                        "group": {
-                            "population": "Befolkning",
-                            "labour": "Arbetsmarknad",
-                            "employment": "Jobb och anställningar",
-                            "industry": "Jobb efter näringsgren",
-                        }[kind],
-                        "tags": [tid, kind],
-                        "from": min(ps),
-                        "to": max(ps),
-                    }
-            loaded.append(tid)
         except Exception as e:
-            print(f"ERROR {tid}: {e}")
+            print(f"ERROR {tid}: {type(e).__name__}: {e}")
+
+    variables = variable_metadata(values, source_ranges)
+
+    # Population is the target variable in the HTML app. If it is missing,
+    # fail loudly rather than producing another misleading green/empty build.
+    if not values.get("population"):
+        raise RuntimeError(
+            "No population observations were extracted. "
+            "The Action must fail instead of publishing empty data.json."
+        )
 
     result = {
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "generated_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        ),
         "source": "SCB Statistikdatabasen, PxWebApi v2",
-        "communes": [{"code": c, "name": commune_map[c]} for c in sorted(commune_map)],
-        "periods": sorted(all_periods),
-        "variables": sorted(variables.values(), key=lambda x: (x["group"], x["name"])),
+        "communes": [
+            {"code": c, "name": communes[c]}
+            for c in sorted(communes)
+        ],
+        "periods": sorted(periods),
+        "variables": variables,
         "values": values,
         "sources": sources,
         "tables_loaded": loaded,
     }
-    OUT.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    print(f"\nWrote {OUT}: municipalities={len(result['communes'])}, months={len(result['periods'])}, variables={len(result['variables'])}")
+
+    OUT.write_text(
+        json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    print("\n=== RESULT ===")
+    print("Municipalities:", len(result["communes"]))
+    print("Periods:", len(result["periods"]))
+    print("Variables:", len(result["variables"]))
+    print("Observations:")
+    for k, by_commune in values.items():
+        n = sum(len(x) for x in by_commune.values())
+        print(f"  {k}: {n}")
     print("Tables loaded:", loaded)
+
 
 if __name__ == "__main__":
     main()
