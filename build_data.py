@@ -725,6 +725,18 @@ def process_table(tid, kind, values, communes, periods, source_ranges):
         rows = jsonstat_rows(obj)
 
         print(f"Returned cells: {len(rows)}")
+        if kind == "labour" and rows:
+            from collections import Counter
+            measure_counts = Counter()
+            measure_labels = {}
+            for r in rows:
+                code = str(r.get("ContentsCode", ""))
+                label = str(r.get("ContentsCode_text", ""))
+                measure_counts[code] += 1
+                measure_labels[code] = label
+            print("TAB6260 raw ContentsCode counts:")
+            for code, count in sorted(measure_counts.items()):
+                print(f"  {code} | {measure_labels.get(code, '')!r} | non-null rows={count}")
 
         before = sum(len(cm) for cm in values.get("population", {}).values())
         add_rows_to_values(
@@ -806,7 +818,10 @@ def main():
         n_communes = len(values[vid])
         print(f"  {vid}: {n_obs} observations across {n_communes} municipalities")
 
-    # Require the core analysis series as well as the tables themselves.
+    # Diagnostic only: do not fail the build here.  TAB6260 is returning 12,180
+    # non-null cells per six-month request although 11 contents were selected.
+    # That is exactly 7 * 290 * 6, so we need to see which ContentsCode values
+    # actually contain numeric data before making another classification change.
     required_series = {
         "population", "population_growth", "employed", "unemployed",
         "labour_force", "employment_rate", "unemployment_rate",
@@ -814,10 +829,8 @@ def main():
     }
     missing_series = sorted(required_series - set(values))
     if missing_series:
-        raise RuntimeError(
-            "Required analysis series missing from SCB extraction: "
-            + ", ".join(missing_series)
-        )
+        print("\nWARNING: Required series currently missing:", ", ".join(missing_series))
+        print("The build is intentionally continuing so the raw TAB6260 measure availability can be diagnosed.")
 
     result = {
         "generated_at": time.strftime(
