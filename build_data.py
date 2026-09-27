@@ -464,50 +464,65 @@ def classify_population_row(row: dict, vars_: list[dict]) -> str | None:
     return None
 
 
-def classify_labour_row(row: dict, vars_: list[dict]) -> str | None:
-    """Map TAB6260 ContentsCode measures to stable application IDs.
-
-    Prefer ContentsCode_text because other *_text fields describe region,
-    age, sex, etc. Fall back to the combined labels only if that field is
-    unavailable.
-    """
-    measure = ""
-    for key in ("ContentsCode_text", "ContentsCode"):
-        if key in row:
-            measure = norm(row.get(key, ""))
-            if measure:
-                break
-
-    exact = {
-        "antal sysselsatta": "employed",
-        "antal arbetslosa": "unemployed",
-        "antal sysselsatta och arbetslosa (arbetskraften)": "labour_force",
-        "arbetsloshet": "unemployment_rate",
-        "arbetskraftsdeltagande": "participation_rate",
-        "sysselsattningsgrad": "employment_rate",
-    }
-    if measure in exact:
-        return exact[measure]
-
-    labels = [norm(v) for k, v in row.items() if k.endswith("_text")]
-    n = " ".join(labels)
-
-    if "sysselsatta och arbetslosa" in n:
+def labour_measure_id(label: object) -> str | None:
+    """Map an SCB TAB6260 measure label to the app's stable series id."""
+    n = norm(label)
+    if not n:
+        return None
+    # Check the combined labour-force label before the shorter components.
+    if "sysselsatta" in n and "arbetslosa" in n and "arbetskraft" in n:
         return "labour_force"
-    if "arbetskraftsdeltagande" in n:
-        return "participation_rate"
     if "sysselsattningsgrad" in n:
         return "employment_rate"
-    if "arbetsloshet" in n:
+    if "arbetskraftsdeltagande" in n:
+        return "participation_rate"
+    if n.startswith("arbetsloshet") or " arbetsloshet" in n:
         return "unemployment_rate"
-    if re.search(r"\bantal arbetslosa\b", n):
+    if "antal arbetslosa" in n:
         return "unemployed"
-    if re.search(r"\bantal sysselsatta\b", n):
+    if "antal sysselsatta" in n:
         return "employed"
-
     return None
 
-def add_rows_to_values(rows, vars_, kind, values, communes, periods):
+
+def build_labour_measure_map(vars_: list[dict]) -> dict[str, str]:
+    """Build a code -> stable series mapping from SCB metadata, not row labels."""
+    measure_var = None
+    for v in vars_:
+        c = norm(var_code(v))
+        t = norm(var_text(v))
+        if "contents" in c or "innehall" in c or "tabellinnehall" in t:
+            measure_var = v
+            break
+    if measure_var is None:
+        return {}
+
+    mapping = {}
+    print("TAB6260 measure mapping from metadata:")
+    for code, label in var_pairs(measure_var):
+        sid = labour_measure_id(label)
+        print(f"  {code} -> {label!r} -> {sid}")
+        if sid:
+            mapping[str(code)] = sid
+    return mapping
+
+
+def classify_labour_row(row: dict, vars_: list[dict], measure_map: dict[str, str] | None = None) -> str | None:
+    """Classify a TAB6260 row, preferring the metadata-derived code mapping."""
+    if measure_map:
+        code = str(row.get("ContentsCode", ""))
+        if code in measure_map:
+            return measure_map[code]
+
+    # Fallback for alternate API response shapes.
+    for key in ("ContentsCode_text", "ContentsCode"):
+        if key in row:
+            sid = labour_measure_id(row.get(key))
+            if sid:
+                return sid
+    return None
+
+def add_rows_to_values(rows, vars_, kind, values, communes, periods, measure_map=None):
     rd, td = detect_region_time(rows, vars_)
 
     for row in rows:
@@ -530,7 +545,7 @@ def add_rows_to_values(rows, vars_, kind, values, communes, periods):
         if kind == "population":
             vid = classify_population_row(row, vars_)
         else:
-            vid = classify_labour_row(row, vars_)
+            vid = classify_labour_row(row, vars_, measure_map)
 
         if not vid:
             continue
@@ -626,6 +641,8 @@ def process_table(tid, kind, values, communes, periods, source_ranges):
     if not vars_:
         raise RuntimeError("No variables found in metadata")
 
+    measure_map = build_labour_measure_map(vars_) if kind == "labour" else {}
+
     print("Variables:")
     for v in vars_:
         print(
@@ -669,7 +686,7 @@ def process_table(tid, kind, values, communes, periods, source_ranges):
 
         before = sum(len(cm) for cm in values.get("population", {}).values())
         add_rows_to_values(
-            rows, vars_, kind, values, communes, periods
+            rows, vars_, kind, values, communes, periods, measure_map
         )
         after = sum(len(cm) for cm in values.get("population", {}).values())
 
