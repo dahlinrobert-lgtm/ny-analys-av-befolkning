@@ -170,15 +170,27 @@ def municipal_regions(region_var: dict):
     return out
 
 
-def total_value(v: dict) -> str | None:
+def total_value(v: dict, *, strict: bool = False) -> str | None:
+    """Return a genuine aggregate/total value when one is identifiable.
+
+    Important for this project: never silently use the first category for an
+    age/sex/birth-region dimension. The previous fallback selected 15-19 in
+    TAB6260, which made ``employed`` an age-specific series rather than total
+    employment.
+
+    If strict=True, return None when no defensible total/aggregate can be
+    identified.
+    """
     pairs = var_pairs(v)
     if not pairs:
         return None
 
+    # Prefer explicit total labels/codes.
     preferred = [
         "totalt", "samtliga", "alla", "total",
-        "bada kon", "bada kön", "båda",
-        "totsa", "totsa", "tot",
+        "samtliga alder", "alla aldrar", "samtliga aldersgrupper",
+        "alla aldersgrupper", "samtliga kon", "bada kon",
+        "bada", "totsa", "tot",
     ]
 
     for code, label in pairs:
@@ -187,12 +199,47 @@ def total_value(v: dict) -> str | None:
         if any(p in n or p == nc for p in preferred):
             return code
 
+    # Labour-market tables often publish a working-age aggregate rather than
+    # a literal "total". Prefer the aggregate age band if it exists.
+    aggregate_age_labels = [
+        "15-74", "16-74", "20-64", "16-64",
+        "15 ar och aldre", "16 ar och aldre",
+        "15 ar+", "16 ar+",
+    ]
+    for code, label in pairs:
+        n = norm(label).replace(" ", "")
+        if any(a.replace(" ", "") in n for a in aggregate_age_labels):
+            return code
+
     # Common SCB total codes.
     for code, _ in pairs:
         if norm(code) in {"totsa", "tot", "total"}:
             return code
 
+    if strict:
+        return None
+
+    # For unknown non-classification dimensions only, retain the old
+    # permissive behaviour. Classification dimensions call strict=True.
     return pairs[0][0]
+
+
+def is_age_dimension(v: dict) -> bool:
+    code = norm(var_code(v))
+    label = norm(var_text(v))
+    return any(x in (code + " " + label) for x in [
+        "alder", "ålder", "age"
+    ])
+
+
+def is_classification_dimension(v: dict) -> bool:
+    code = norm(var_code(v))
+    label = norm(var_text(v))
+    return any(x in (code + " " + label) for x in [
+        "kon", "sex", "alder", "ålder", "age",
+        "fodelseregion", "birthregion", "birth region",
+        "sektor", "sector"
+    ])
 
 
 def choose_non_region_values(v: dict, kind: str) -> list[str]:
@@ -239,17 +286,23 @@ def choose_non_region_values(v: dict, kind: str) -> list[str]:
     if "contents" in code or "innehall" in label or "matt" in label:
         return [c for c, _ in pairs[:3]]
 
-    # For common breakdown dimensions, use the total.
-    if any(x in (code + " " + label) for x in [
-        "kon", "sex", "alder", "ålder", "fodelseregion",
-        "fodelseregion", "sektor", "sector"
-    ]):
-        return [total_value(v)]
+    # For classification dimensions, NEVER fall back to the first category.
+    # A first-category fallback is what previously selected age 15-19 in
+    # TAB6260 and produced the wrong "Sysselsatta" series.
+    if is_classification_dimension(v):
+        total = total_value(v, strict=True)
+        if total is None:
+            raise RuntimeError(
+                f"No defensible aggregate value found for classification "
+                f"variable {var_code(v)} ({var_text(v)}). "
+                f"Available values: {var_pairs(v)[:25]}"
+            )
+        return [total]
 
     # If the table has an unknown mandatory dimension, use a total when one
-    # exists; otherwise the first value. This is safer than multiplying
-    # every dimension silently.
-    return [total_value(v)]
+    # exists; otherwise retain the first-value fallback only for dimensions
+    # that are not known classification dimensions.
+    return [total_value(v, strict=False)]
 
 
 def choose_selections(tid: str, vars_: list[dict], regions, times, kind):
@@ -268,6 +321,8 @@ def choose_selections(tid: str, vars_: list[dict], regions, times, kind):
         },
     ]
 
+    selected_non_region = {}
+
     for v in vars_:
         c = var_code(v)
         if c in {var_code(region_var), var_code(time_var)}:
@@ -281,6 +336,27 @@ def choose_selections(tid: str, vars_: list[dict], regions, times, kind):
                 f"No values selected for mandatory variable {c} ({var_text(v)})"
             )
         selection.append({"variableCode": c, "valueCodes": vals})
+        selected_non_region[c] = {
+            "text": var_text(v),
+            "values": vals,
+            "valueTexts": {
+                code: label for code, label in var_pairs(v)
+                if code in vals
+            },
+        }
+
+    # Explicitly print the selected classification values for diagnostics.
+    # This makes it immediately visible in GitHub Actions if an age total
+    # was selected incorrectly.
+    print("Selected classification values:")
+    for c, info in selected_non_region.items():
+        if is_classification_dimension(next(
+            v for v in vars_ if var_code(v) == c
+        )):
+            print(
+                f"  {c} | {info['text']} | "
+                f"{[(x, info['valueTexts'].get(x, x)) for x in info['values']]}"
+            )
 
     return selection
 
