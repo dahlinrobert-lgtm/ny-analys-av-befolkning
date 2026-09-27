@@ -30,8 +30,8 @@ OUT = Path("data.json")
 
 # These are the municipal monthly tables we actually want to use.
 TABLES = [
-    ("TAB1625", "population_old"),
-    ("TAB6473", "population_new"),
+    ("TAB1625", "population"),
+    ("TAB6473", "population"),
     ("TAB6260", "labour"),
 ]
 
