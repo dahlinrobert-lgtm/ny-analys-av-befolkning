@@ -465,25 +465,39 @@ def classify_population_row(row: dict, vars_: list[dict]) -> str | None:
 
 
 def labour_measure_id(label: object) -> str | None:
-    """Map an SCB TAB6260 measure label to the app's stable series id."""
+    """Map any SCB TAB6260 measure label to a stable series id.
+
+    SCB may return slightly different wording between metadata and the
+    JSON-stat row labels (for example with/without ``antal``). Therefore the
+    classifier uses the distinctive concept words rather than requiring one
+    exact phrase.
+    """
     n = norm(label)
     if not n:
         return None
-    # Check the combined labour-force label before the shorter components.
-    if "sysselsatta" in n and "arbetslosa" in n and "arbetskraft" in n:
-        return "labour_force"
+
+    # Most specific concepts first.
     if "sysselsattningsgrad" in n:
         return "employment_rate"
     if "arbetskraftsdeltagande" in n:
         return "participation_rate"
-    if n.startswith("arbetsloshet") or " arbetsloshet" in n:
+    if "arbetsloshet" in n:
         return "unemployment_rate"
-    if "antal arbetslosa" in n:
-        return "unemployed"
-    if "antal sysselsatta" in n:
-        return "employed"
-    return None
 
+    # The labour-force stock is explicitly the combination of employed and
+    # unemployed. Accept both the full SCB label and shorter variants.
+    if "arbetskraft" in n and ("sysselsatt" in n or "arbetslos" in n):
+        return "labour_force"
+    if "sysselsatta och arbetslosa" in n:
+        return "labour_force"
+
+    # Person counts. Do not let the rate labels above fall through here.
+    if "arbetslos" in n:
+        return "unemployed"
+    if "sysselsatt" in n:
+        return "employed"
+
+    return None
 
 def build_labour_measure_map(vars_: list[dict]) -> dict[str, str]:
     """Build a code -> stable series mapping from SCB metadata, not row labels."""
